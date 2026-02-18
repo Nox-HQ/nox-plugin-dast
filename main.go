@@ -53,7 +53,7 @@ func newHTTPClient() *http.Client {
 // checkMissingHeaders (DAST-001) sends a GET request and reports any
 // missing security headers.
 func checkMissingHeaders(ctx context.Context, client *http.Client, targetURL string) []checkResult {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, http.NoBody)
 	if err != nil {
 		return nil
 	}
@@ -62,7 +62,7 @@ func checkMissingHeaders(ctx context.Context, client *http.Client, targetURL str
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var results []checkResult
 	var missing []string
@@ -91,7 +91,7 @@ func checkMissingHeaders(ctx context.Context, client *http.Client, targetURL str
 // Origin and checks whether the server responds with a wildcard
 // Access-Control-Allow-Origin or reflects credentials with a wildcard.
 func checkInsecureCORS(ctx context.Context, client *http.Client, targetURL string) []checkResult {
-	req, err := http.NewRequestWithContext(ctx, http.MethodOptions, targetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodOptions, targetURL, http.NoBody)
 	if err != nil {
 		return nil
 	}
@@ -102,13 +102,14 @@ func checkInsecureCORS(ctx context.Context, client *http.Client, targetURL strin
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	acao := resp.Header.Get("Access-Control-Allow-Origin")
 	acac := resp.Header.Get("Access-Control-Allow-Credentials")
 
 	var results []checkResult
-	if acao == "*" {
+	switch acao {
+	case "*":
 		msg := "CORS allows wildcard origin (*)"
 		if strings.EqualFold(acac, "true") {
 			msg = "CORS allows wildcard origin (*) with credentials"
@@ -125,7 +126,7 @@ func checkInsecureCORS(ctx context.Context, client *http.Client, targetURL strin
 				"target_url": targetURL,
 			},
 		})
-	} else if acao == "https://evil.example.com" {
+	case "https://evil.example.com":
 		results = append(results, checkResult{
 			RuleID:     "DAST-002",
 			Severity:   sdk.SeverityHigh,
@@ -151,7 +152,8 @@ func checkMissingTLS(ctx context.Context, _ *http.Client, targetURL string) []ch
 	}
 
 	var results []checkResult
-	if parsed.Scheme == "http" {
+	switch parsed.Scheme {
+	case "http":
 		results = append(results, checkResult{
 			RuleID:     "DAST-003",
 			Severity:   sdk.SeverityMedium,
@@ -163,7 +165,7 @@ func checkMissingTLS(ctx context.Context, _ *http.Client, targetURL string) []ch
 				"target_url": targetURL,
 			},
 		})
-	} else if parsed.Scheme == "https" {
+	case "https":
 		host := parsed.Host
 		if !strings.Contains(host, ":") {
 			host += ":443"
@@ -183,7 +185,7 @@ func checkMissingTLS(ctx context.Context, _ *http.Client, targetURL string) []ch
 				},
 			})
 		} else {
-			conn.Close()
+			_ = conn.Close()
 		}
 	}
 	return results
@@ -192,7 +194,7 @@ func checkMissingTLS(ctx context.Context, _ *http.Client, targetURL string) []ch
 // checkInsecureCookies (DAST-004) sends a GET request and inspects
 // Set-Cookie headers for missing Secure, HttpOnly, or SameSite flags.
 func checkInsecureCookies(ctx context.Context, client *http.Client, targetURL string) []checkResult {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, http.NoBody)
 	if err != nil {
 		return nil
 	}
@@ -201,7 +203,7 @@ func checkInsecureCookies(ctx context.Context, client *http.Client, targetURL st
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var results []checkResult
 	for _, cookie := range resp.Cookies() {
@@ -240,7 +242,7 @@ func checkMissingRateLimit(ctx context.Context, client *http.Client, targetURL s
 
 	gotRateLimited := false
 	for i := 0; i < burstCount; i++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, http.NoBody)
 		if err != nil {
 			return nil
 		}
@@ -248,7 +250,7 @@ func checkMissingRateLimit(ctx context.Context, client *http.Client, targetURL s
 		if err != nil {
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			gotRateLimited = true
@@ -307,7 +309,7 @@ func checkOpenRedirect(ctx context.Context, client *http.Client, targetURL strin
 		u := *parsed
 		u.RawQuery = q.Encode()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 		if err != nil {
 			continue
 		}
@@ -316,7 +318,7 @@ func checkOpenRedirect(ctx context.Context, client *http.Client, targetURL strin
 		if err != nil {
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			location := resp.Header.Get("Location")
@@ -393,12 +395,15 @@ func handleScan(ctx context.Context, req sdk.ToolRequest) (*pluginv1.InvokeToolR
 	return resp.Build(), nil
 }
 
-func main() {
+func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	srv := buildServer()
-	if err := srv.Serve(ctx); err != nil {
+	return buildServer().Serve(ctx)
+}
+
+func main() {
+	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "nox-plugin-dast: %v\n", err)
 		os.Exit(1)
 	}

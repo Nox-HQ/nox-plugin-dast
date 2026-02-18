@@ -457,7 +457,7 @@ func TestCheckOpenRedirect_MultipleParams(t *testing.T) {
 // --- helpers ---
 
 func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr(s, sub))
+	return len(s) >= len(sub) && (s == sub || s != "" && containsStr(s, sub))
 }
 
 func containsStr(s, sub string) bool {
@@ -490,7 +490,7 @@ func testClient(t *testing.T) pluginv1.PluginServiceClient {
 	if err != nil {
 		t.Fatalf("grpc.NewClient: %v", err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 
 	return pluginv1.NewPluginServiceClient(conn)
 }
@@ -513,5 +513,3 @@ func invokeScan(t *testing.T, client pluginv1.PluginServiceClient, targetURL str
 	}
 	return resp
 }
-
-
