@@ -3,7 +3,7 @@ module github.com/nox-hq/nox-plugin-dast
 go 1.25.6
 
 require (
-	github.com/nox-hq/nox v0.1.0
+	github.com/nox-hq/nox v0.5.0
 	google.golang.org/grpc v1.79.1
 	google.golang.org/protobuf v1.36.11
 )
