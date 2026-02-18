@@ -1,5 +1,5 @@
 ai:
-    enabled: true
+    enabled: false
     provider: openai
     model: gpt-4
     apikey: ${OPENAI_API_KEY}
