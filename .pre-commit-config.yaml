@@ -29,3 +29,19 @@ repos:
         entry: gofmt -l -w
         language: system
         types: [go]
+
+      - id: nox-scan
+        name: nox security scan
+        entry: nox scan .
+        language: system
+        pass_filenames: false
+        types: [go]
+        stages: [pre-commit]
+
+      - id: coverctl
+        name: coverctl coverage check
+        entry: bash -c 'go test -coverprofile=coverage.out ./... && coverctl -q check --config .coverctl.yaml --profile coverage.out'
+        language: system
+        pass_filenames: false
+        types: [go]
+        stages: [pre-commit]
