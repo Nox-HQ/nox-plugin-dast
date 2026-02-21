@@ -1,0 +1,7 @@
+name: nox-plugin-dast
+version: 0.1.0
+track: dynamic-runtime
+description: Dynamic application security testing against live HTTP targets (headers, CORS, TLS, cookies, rate limiting)
+tools:
+  - name: scan
+    description: Probe a target URL for security misconfigurations
