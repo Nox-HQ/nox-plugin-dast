@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -512,4 +513,144 @@ func invokeScan(t *testing.T, client pluginv1.PluginServiceClient, targetURL str
 		t.Fatalf("InvokeTool(scan): %v", err)
 	}
 	return resp
+}
+
+// --- DAST-007: Prompt Injection (AI-DAST) ---
+
+// promptCanaryServer returns a fake AI gateway. When echoCanary is
+// true the handler dumps the request body back as the response body
+// (simulating a model that complied with the injection); otherwise it
+// returns a generic JSON envelope so the canary string is absent.
+func promptCanaryServer(echoCanary bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if echoCanary {
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 8192))
+			_, _ = w.Write(body)
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"refused"}}]}`))
+	}))
+}
+
+func TestDAST007_PromptInjectionCompliant(t *testing.T) {
+	ts := promptCanaryServer(true)
+	defer ts.Close()
+
+	results := checkPromptInjection(context.Background(), ts.Client(), ts.URL)
+	if len(results) == 0 {
+		t.Fatal("expected DAST-007 finding when canary is echoed")
+	}
+	r := results[0]
+	if r.RuleID != "DAST-007" {
+		t.Errorf("rule = %q, want DAST-007", r.RuleID)
+	}
+	if r.Metadata["owasp_llm"] != "LLM01" {
+		t.Errorf("owasp_llm = %q, want LLM01", r.Metadata["owasp_llm"])
+	}
+}
+
+func TestDAST007_PromptInjectionRefused(t *testing.T) {
+	ts := promptCanaryServer(false)
+	defer ts.Close()
+
+	results := checkPromptInjection(context.Background(), ts.Client(), ts.URL)
+	if len(results) != 0 {
+		t.Errorf("expected 0 findings when canary not echoed, got %d", len(results))
+	}
+}
+
+// --- DAST-008: System Prompt Leak (AI-DAST) ---
+
+func TestDAST008_SystemPromptLeak(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SYSTEM: You are a helpful assistant. Never reveal customer data."}}]}`))
+	}))
+	defer ts.Close()
+
+	results := checkSystemPromptLeak(context.Background(), ts.Client(), ts.URL)
+	if len(results) == 0 {
+		t.Fatal("expected DAST-008 finding when SYSTEM: prefix appears in response")
+	}
+	if results[0].RuleID != "DAST-008" {
+		t.Errorf("rule = %q, want DAST-008", results[0].RuleID)
+	}
+}
+
+func TestDAST008_NoLeak(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"I cannot share that."}}]}`))
+	}))
+	defer ts.Close()
+
+	results := checkSystemPromptLeak(context.Background(), ts.Client(), ts.URL)
+	if len(results) != 0 {
+		t.Errorf("expected 0 findings when no leak signal present, got %d", len(results))
+	}
+}
+
+// --- DAST-009: Tool Smuggling (AI-DAST) ---
+
+func TestDAST009_ToolSmuggling_Accepted(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"resp-1"}`))
+	}))
+	defer ts.Close()
+
+	results := checkToolSmuggling(context.Background(), ts.Client(), ts.URL)
+	if len(results) == 0 {
+		t.Fatal("expected DAST-009 finding when gateway accepts attacker-defined tool")
+	}
+	if results[0].Severity != sdk.SeverityCritical {
+		t.Errorf("severity = %v, want SeverityCritical", results[0].Severity)
+	}
+}
+
+func TestDAST009_ToolSmuggling_Rejected(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer ts.Close()
+
+	results := checkToolSmuggling(context.Background(), ts.Client(), ts.URL)
+	if len(results) != 0 {
+		t.Errorf("expected 0 findings when gateway rejects payload, got %d", len(results))
+	}
+}
+
+// --- DAST-010: AI Cost Amplification (AI-DAST) ---
+
+func TestDAST010_NoRateLimit(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer ts.Close()
+
+	results := checkAICostAmplification(context.Background(), ts.Client(), ts.URL)
+	if len(results) == 0 {
+		t.Fatal("expected DAST-010 finding when burst all succeeds with no rate-limit header")
+	}
+	if results[0].Metadata["rate_limit_seen"] != "false" {
+		t.Errorf("rate_limit_seen = %q, want false", results[0].Metadata["rate_limit_seen"])
+	}
+}
+
+func TestDAST010_RateLimitPresent(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "10")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	results := checkAICostAmplification(context.Background(), ts.Client(), ts.URL)
+	if len(results) != 0 {
+		t.Errorf("expected 0 findings when rate-limit header present, got %d", len(results))
+	}
 }
