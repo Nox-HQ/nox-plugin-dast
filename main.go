@@ -401,7 +401,7 @@ var aiPayloadShapes = []func(prompt string) []byte{
 // came back with a 2xx response. Empty body means no AI-shaped
 // endpoint replied. Body is capped at 64 KB so a hostile streaming
 // response cannot exhaust memory.
-func aiPost(ctx context.Context, client *http.Client, targetURL, prompt string) (string, int) {
+func aiPost(ctx context.Context, client *http.Client, targetURL, prompt string) (body string, status int) {
 	for _, shape := range aiPayloadShapes {
 		body := shape(prompt)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
@@ -478,10 +478,10 @@ func checkSystemPromptLeak(ctx context.Context, client *http.Client, targetURL s
 		Message:    fmt.Sprintf("AI endpoint disclosed system prompt material under direct request (matched %q)", hit),
 		CWE:        "CWE-200",
 		Metadata: map[string]string{
-			"target_url":   targetURL,
-			"http_status":  fmt.Sprintf("%d", status),
-			"matched_sig":  hit,
-			"owasp_llm":    "LLM06",
+			"target_url":  targetURL,
+			"http_status": fmt.Sprintf("%d", status),
+			"matched_sig": hit,
+			"owasp_llm":   "LLM06",
 		},
 	}}
 }
