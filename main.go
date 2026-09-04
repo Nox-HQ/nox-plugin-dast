@@ -602,7 +602,25 @@ func buildServer() *sdk.PluginServer {
 func handleScan(ctx context.Context, req sdk.ToolRequest) (*pluginv1.InvokeToolResponse, error) {
 	targetURL := req.InputString("target_url")
 	if targetURL == "" {
+		// Every check in this plugin probes a live endpoint, so without a URL
+		// there is nothing to scan. Returning an empty response silently made
+		// that indistinguishable from a clean scan — and it is the ordinary
+		// case, because `nox scan` invokes the "scan" tool with only
+		// workspace_root and exclude. A project listing nox/dast in
+		// plugins.required therefore got silence on every scan, which reads as
+		// "the DAST checks ran and found nothing".
+		//
+		// Say it instead. The diagnostic lands in the tool result and, through
+		// it, in the scan output.
 		resp := sdk.NewResponse()
+		resp.Diagnostic(
+			pluginv1.DiagnosticSeverity_DIAGNOSTIC_SEVERITY_WARNING,
+			"no target_url given, so no DAST checks ran: this plugin probes a "+
+				"live endpoint and cannot analyse source. Invoke it with "+
+				"`nox plugin call nox/dast scan target_url=https://your-host` "+
+				"rather than through `nox scan`, which supplies no target.",
+			"nox/dast",
+		)
 		return resp.Build(), nil
 	}
 

@@ -1,39 +1,65 @@
 # nox-plugin-dast
 
-**DAST web/API security scanning for server-side code.**
+**Active DAST probing of a running web or API endpoint.**
 
 ## Overview
 
-`nox-plugin-dast` performs static detection of web and API security misconfigurations in server-side source code. Rather than requiring a running application, it identifies code patterns that would lead to exploitable security issues at runtime -- missing security headers, insecure CORS policies, TLS enforcement gaps, cookie misconfigurations, absent rate limiting, and open redirect vulnerabilities.
+`nox-plugin-dast` sends real HTTP requests to a URL you give it and reports what
+the responses reveal: missing security headers, permissive CORS, missing TLS,
+insecure cookies, absent rate limiting, and open redirects.
 
-This plugin bridges the gap between traditional SAST (which focuses on code-level bugs) and runtime DAST tools (which require a deployed application). By detecting DAST-class issues directly in source code during development, teams catch web security misconfigurations before they reach staging or production environments. The plugin supports mitigation-aware analysis: if security controls like `helmet` (Node.js) or explicit header-setting code are present in the same file, the corresponding finding is automatically suppressed.
+**It does not analyse source code.** Every check needs a live endpoint. There is
+no file walking, no language support and no framework detection — earlier
+revisions of this README described all three, and none of it was ever true of
+the code.
 
-The plugin belongs to the **Dynamic Runtime** track and operates with an active risk class, meaning it requires user confirmation before scanning. This classification reflects the nature of the issues it detects -- problems that manifest at runtime in deployed web services.
+Two consequences worth stating plainly:
+
+- **`nox scan` cannot drive this plugin.** A scan invokes the `scan` tool with
+  `workspace_root` and `exclude` and no target, because nox scans source trees.
+  Listing `nox/dast` in `plugins.required` therefore contributes nothing to a
+  scan; since v0.3.4 it emits a warning saying so instead of returning silently.
+- **Use `nox plugin call`.** That is the supported way to run it, and the target
+  is explicit at the point of use.
+
+The plugin belongs to the **Dynamic Runtime** track with an active risk class
+and requires confirmation, because it sends traffic to a host you name — five
+rapid requests for the rate-limit check, and redirect probes against common
+parameters. Only point it at systems you are authorised to test.
 
 ## Use Cases
 
-### Catching Missing Security Headers Before Code Review
+### Checking a deployment's response headers
 
-A backend team is building a new REST API in Express.js. During development, engineers focus on business logic and frequently forget to add security headers like `Content-Security-Policy`, `Strict-Transport-Security`, and `X-Frame-Options`. Running `nox-plugin-dast` in the pre-merge CI pipeline flags every endpoint that sends responses without these headers, so reviewers can focus on design rather than checklists.
+A service is behind a reverse proxy that is supposed to add CSP, HSTS and
+`X-Frame-Options`. Whether it actually does is a property of the deployment, not
+of the source — a header added in nginx is invisible to any code scanner. One
+call against the deployed URL answers it.
 
-### Auditing CORS Configuration Across Microservices
+### Confirming a CORS policy in the environment that serves it
 
-An organization with 30+ microservices in Go, Python, and TypeScript needs to ensure none of them allow wildcard CORS origins in production. Rather than manually reviewing each service, the security team runs the DAST plugin across all repositories in a single sweep. Any service using `AllowAllOrigins: true` or `Access-Control-Allow-Origin: *` is flagged immediately.
+CORS is frequently set by a gateway or CDN rather than the application. Sending
+an `OPTIONS` request with a foreign `Origin` shows what the deployed stack
+actually returns, wildcard or not.
 
-### Preventing Open Redirect Vulnerabilities in Login Flows
+### Verifying rate limiting exists where it is supposed to
 
-A product team implements a "redirect after login" feature that takes a URL parameter from the request and passes it to `http.Redirect` or `res.redirect`. This is a classic open redirect vulnerability (CWE-601). The DAST plugin catches this pattern at the code level, before a penetration tester finds it in production, giving the team time to implement an allowlist-based redirect approach.
+A burst of five requests shows whether the endpoint returns `429` or any
+recognised rate-limit header. Absence is reported at medium confidence: a
+threshold above five will not be observed, and this check cannot tell an
+unprotected endpoint from a generous one.
 
-### Enforcing Cookie Security in Django and Flask Applications
+### Post-deploy verification in a pipeline
 
-A Python team maintains several Django and Flask applications that handle session cookies. The DAST plugin scans for `SESSION_COOKIE_SECURE = False`, `httponly = False`, and other insecure cookie patterns, ensuring that session cookies always have the `Secure`, `HttpOnly`, and `SameSite` flags set before deployment.
+Run it against staging after a deploy, with the environment's URL as
+`target_url`, to catch a header or TLS regression that source review cannot see.
 
 ## 5-Minute Demo
 
 ### Prerequisites
 
-- Go 1.25+
 - [Nox](https://github.com/nox-hq/nox) installed
+- A URL you are authorised to probe
 
 ### Quick Start
 
@@ -43,108 +69,104 @@ A Python team maintains several Django and Flask applications that handle sessio
    nox plugin install nox-hq/nox-plugin-dast
    ```
 
-2. **Create a test project with vulnerable patterns**
+2. **Permit it in a working directory**
 
-   ```bash
-   mkdir -p demo-dast && cd demo-dast
+   The plugin is active risk class and needs confirmation, so a passive policy
+   refuses it. Create `.nox.yaml`:
+
+   ```yaml
+   plugin_policy:
+     allowed_network_hosts:
+       - "your-host.example.com"
+     max_risk_class: active
+     allow_confirmation_required: true
    ```
 
-   Create `server.go`:
+3. **Probe the endpoint**
 
-   ```go
-   package main
+   ```bash
+   nox plugin call nox/dast scan target_url=https://your-host.example.com
+   ```
 
-   import (
-       "fmt"
-       "net/http"
-   )
-
-   func handler(w http.ResponseWriter, r *http.Request) {
-       w.Header().Set("Content-Type", "application/json")
-       w.Header().Set("Access-Control-Allow-Origin", "*")
-
-       http.SetCookie(w, &http.Cookie{
-           Name:     "session",
-           Value:    "abc123",
-           Secure:   false,
-           HttpOnly: false,
-       })
-
-       redirectURL := r.URL.Query().Get("next")
-       if redirectURL != "" {
-           http.Redirect(w, r, r.URL.Query().Get("next"), http.StatusFound)
-           return
+   ```json
+   {
+     "findings": [
+       {
+         "rule_id": "DAST-001",
+         "message": "Missing security headers: Content-Security-Policy, Strict-Transport-Security, X-Frame-Options, X-Content-Type-Options",
+         "metadata": {
+           "cwe": "CWE-693",
+           "missing_headers": "Content-Security-Policy,Strict-Transport-Security,X-Frame-Options,X-Content-Type-Options",
+           "target_url": "https://your-host.example.com"
+         }
+       },
+       {
+         "rule_id": "DAST-005",
+         "message": "No rate limiting detected after 5 rapid requests",
+         "metadata": { "cwe": "CWE-770", "burst_count": "5" }
        }
-
-       fmt.Fprintf(w, `{"status": "ok"}`)
-   }
-
-   func main() {
-       http.HandleFunc("/api/users", handler)
-       http.ListenAndServe(":8080", nil)
+     ]
    }
    ```
 
-3. **Run the scan**
-
-   ```bash
-   nox scan --plugin nox/dast .
-   ```
-
-4. **Review findings**
-
-   ```
-   DAST-001  HIGH/HIGH    server.go:5   Missing security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options): w.Header().Set("Content-Type", "application/json")
-   DAST-002  HIGH/MED     server.go:6   Insecure CORS configuration: w.Header().Set("Access-Control-Allow-Origin", "*")
-   DAST-003  MED/HIGH     server.go:24  Missing TLS/HTTPS enforcement: http.ListenAndServe(":8080", nil)
-   DAST-004  HIGH/MED     server.go:9   Insecure cookie settings (missing Secure, HttpOnly, or SameSite flags): Secure:   false
-   DAST-005  MED/MED      server.go:23  Missing rate limiting on API endpoint: http.HandleFunc("/api/users", handler)
-   DAST-006  HIGH/HIGH    server.go:17  Open redirect: user input used in redirect URL: http.Redirect(w, r, r.URL.Query().Get("next"), http.StatusFound)
-
-   6 findings (4 high, 2 medium)
-   ```
+   Verify a header finding yourself with `curl -sSI https://your-host.example.com`
+   — the checks are simple enough that you should be able to.
 
 ## Rules
 
-| Rule ID  | Description                                                          | Severity | Confidence | CWE     |
-|----------|----------------------------------------------------------------------|----------|------------|---------|
-| DAST-001 | Missing security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options) | HIGH     | HIGH       | CWE-693 |
-| DAST-002 | Insecure CORS configuration (wildcard or credentials with wildcard)  | HIGH     | MEDIUM     | CWE-942 |
-| DAST-003 | Missing TLS/HTTPS enforcement (http:// URLs, disabled cert verify)   | MEDIUM   | HIGH       | CWE-319 |
-| DAST-004 | Insecure cookie settings (missing Secure, HttpOnly, or SameSite)     | HIGH     | MEDIUM     | CWE-614 |
-| DAST-005 | Missing rate limiting on API endpoints                               | MEDIUM   | MEDIUM     | CWE-770 |
-| DAST-006 | Open redirect: user input used in redirect URL                       | HIGH     | HIGH       | CWE-601 |
+Severity and confidence vary per finding within a rule, so the ranges below are
+what the code emits rather than one fixed grade.
 
-### Mitigations
+| Rule ID  | What it probes                                                            | Severity        | Confidence      | CWE     |
+|----------|---------------------------------------------------------------------------|-----------------|-----------------|---------|
+| DAST-001 | Response headers absent: CSP, HSTS, X-Frame-Options, X-Content-Type-Options | HIGH            | HIGH            | CWE-693 |
+| DAST-002 | CORS response to an `OPTIONS` with a foreign `Origin`                      | HIGH            | MEDIUM / HIGH   | CWE-942 |
+| DAST-003 | The target URL's scheme is `http://`                                       | MEDIUM / HIGH   | HIGH            | CWE-319 |
+| DAST-004 | `Set-Cookie` missing `Secure`, `HttpOnly` or `SameSite`                    | HIGH            | MEDIUM          | CWE-614 |
+| DAST-005 | No `429` or rate-limit header after five rapid requests                    | MEDIUM          | MEDIUM          | CWE-770 |
+| DAST-006 | A common redirect parameter is honoured to an external host                | HIGH            | HIGH            | CWE-601 |
+| DAST-007 | Instruction override accepted *(opt-in)*                                   | HIGH            | HIGH            | —       |
+| DAST-008 | System prompt leaked *(opt-in)*                                            | HIGH            | MEDIUM          | —       |
+| DAST-009 | Tool smuggling accepted *(opt-in)*                                         | CRITICAL        | HIGH            | —       |
+| DAST-010 | Cost amplification unbounded *(opt-in)*                                    | HIGH            | HIGH            | —       |
 
-The plugin automatically suppresses findings when security controls are detected in the same file:
+DAST-005 deserves a caveat: five requests cannot distinguish an endpoint with no
+rate limiting from one whose threshold is above five. It is reported at medium
+confidence for that reason, and on a static site behind a CDN it is usually
+noise.
 
-| Rule     | Suppressed When File Contains                                           |
-|----------|-------------------------------------------------------------------------|
-| DAST-001 | `Content-Security-Policy`, `Strict-Transport-Security`, `X-Frame-Options`, `X-Content-Type-Options`, or `helmet` |
-| DAST-005 | `rate_limit`, `ratelimit`, `throttle`, `limiter`, `RateLimiter`, or `slowDown` |
+### AI probes (opt-in)
 
-## Supported Languages / File Types
+`DAST-007`–`DAST-010` send instruction-override, system-prompt-leak,
+tool-smuggling and cost-amplification payloads. They are **off by default** so a
+generic scan against a non-AI host never sends them. Opt in per call:
 
-| Language   | Extension | Frameworks Detected                                      |
-|------------|-----------|----------------------------------------------------------|
-| Go         | `.go`     | net/http, Gin, Chi, Echo                                 |
-| Python     | `.py`     | Django, Flask, FastAPI                                   |
-| JavaScript | `.js`     | Express, Koa, Fastify                                    |
-| TypeScript | `.ts`     | Express, NestJS, Fastify                                 |
+```bash
+nox plugin call nox/dast scan target_url=https://your-ai-host ai_probes=true
+```
 
 ## Configuration
 
-The plugin uses Nox's standard configuration. No additional configuration is required.
+The target is an argument, not configuration:
 
-```yaml
-# .nox.yaml (optional)
-plugins:
-  nox/dast:
-    enabled: true
+```bash
+nox plugin call nox/dast scan target_url=https://your-host
 ```
 
-Directories automatically skipped during scanning: `.git`, `vendor`, `node_modules`, `__pycache__`, `.venv`.
+A URL without a scheme is assumed to be `https://`.
+
+Because the plugin is active risk class and needs confirmation, a passive policy
+refuses it. To permit it, widen the sandbox in `.nox.yaml`:
+
+```yaml
+plugin_policy:
+  allowed_network_hosts:
+    - "your-host.example.com"
+  max_risk_class: active
+  allow_confirmation_required: true
+```
+
+Overrides are one-directional: you can widen an allowlist but not empty one.
 
 ## Installation
 
@@ -189,14 +211,24 @@ make clean
 
 ## Architecture
 
-The plugin operates as a Nox plugin server communicating over stdio using the Nox Plugin SDK. Internally it follows a straightforward pipeline:
+The plugin is a Nox plugin server speaking the Plugin SDK protocol over stdio.
+It registers one tool, `scan`, under the `dast` capability, with active risk
+classification and confirmation required.
 
-1. **File Discovery** -- Recursively walks the workspace directory, filtering by supported file extensions (`.go`, `.py`, `.js`, `.ts`) and skipping common non-source directories.
-2. **Line-by-Line Matching** -- Each file is read line-by-line. Every line is tested against all rule patterns for the matching file extension. Rules use compiled regular expressions grouped by file extension to support language-specific syntax patterns.
-3. **Mitigation Check** -- Before emitting findings, the full file content is checked for mitigation patterns. If a known security control is present anywhere in the file, the associated rule's findings are suppressed for that file.
-4. **Finding Emission** -- Matched lines that are not mitigated produce findings with rule ID, severity, confidence, CWE identifier, file location, and the matched source line.
+`scan` takes `target_url` and runs six checks against it, each an HTTP exchange:
 
-The plugin registers a single tool (`scan`) under the `dast` capability with active risk classification, requiring user confirmation before execution.
+1. **DAST-001** — `GET`, then inspect the response headers.
+2. **DAST-002** — `OPTIONS` with a foreign `Origin`, then inspect the CORS
+   response headers.
+3. **DAST-003** — parse the URL scheme; `http://` is reported, `https://` is not.
+4. **DAST-004** — `GET`, then inspect `Set-Cookie` attributes.
+5. **DAST-005** — five rapid `GET`s, looking for `429` or a rate-limit header.
+6. **DAST-006** — request common redirect parameters and follow what comes back.
+
+`DAST-007`–`DAST-010` run only when `ai_probes` is set.
+
+There is no file discovery, no regex matching against source, and no
+mitigation-by-file-content step. Nothing on disk is read.
 
 ## Contributing
 
