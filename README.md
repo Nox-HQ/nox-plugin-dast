@@ -1,5 +1,7 @@
 # nox-plugin-dast
 
+[![nox security grade](.github/nox-badge.svg)](https://github.com/nox-hq/nox)
+
 **Active DAST probing of a running web or API endpoint.**
 
 ## Overview

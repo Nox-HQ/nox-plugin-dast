@@ -476,7 +476,7 @@ func checkSystemPromptLeak(ctx context.Context, client *http.Client, targetURL s
 		RuleID:     "DAST-008",
 		Severity:   sdk.SeverityHigh,
 		Confidence: sdk.ConfidenceMedium,
-		Message:    fmt.Sprintf("AI endpoint disclosed system prompt material under direct request (matched %q)", hit),
+		Message:    fmt.Sprintf("AI endpoint disclosed system prompt material under direct request (matched %q)", hit), // nox:ignore AI-006 -- hit is one of the fixed leakSignals above, never the response body; the finding records which signature matched
 		CWE:        "CWE-200",
 		Metadata: map[string]string{
 			"target_url":  targetURL,
